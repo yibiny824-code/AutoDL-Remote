@@ -75,6 +75,7 @@ autodl-remote exec --tmux --name train-live --model baseline --stage training --
 autodl-remote tmux capture train-live --lines 200
 autodl-remote run status train
 autodl-remote run tail train
+autodl-remote run stop train
 autodl-remote dashboard
 ```
 
@@ -250,7 +251,7 @@ autodl-remote tmux capture [--account name] [--remote path] [--lines 120] <sessi
 autodl-remote tmux attach-cmd [--account name] [--remote path] <session>
 autodl-remote tmux kill [--account name] [--remote path] <session>
 
-autodl-remote exec [--account name] [--remote path] [--detach|--tmux] [--cwd path] [--name name] [--model name] [--tag k=v] [--stage stage] [--purpose text] [--script local_script] [--stdin] -- <command>
+autodl-remote exec [--account name] [--remote path] [--detach|--tmux] [--cwd path] [--name name] [--replace] [--model name] [--tag k=v] [--stage stage] [--purpose text] [--script local_script] [--stdin] -- <command>
 autodl-remote put-run <local-path>... -- <command>
 autodl-remote put [--account name] [--remote path] <local-path> [remote-path]
 autodl-remote get [--account name] [--remote path] <remote-path> [local-path]
@@ -262,10 +263,12 @@ autodl-remote cat [--account name] [--remote path] [--lines 200] -- <remote-path
 autodl-remote tail [--account name] [--remote path] [--lines 120] [--follow] -- <remote-path>
 autodl-remote job list
 autodl-remote job status <name>
+autodl-remote job stop <name>
 autodl-remote job tail [--lines 120] [--follow] <name>
 autodl-remote run submit [metadata/options] -- <command>
 autodl-remote run list
 autodl-remote run status <name>
+autodl-remote run stop <name>
 autodl-remote run tail [--lines 120] [--follow] <name>
 autodl-remote run note <name> [--model name] [--tag k=v] [--stage stage] [--purpose text] [--output path]
 autodl-remote shutdown [--wait seconds]
@@ -283,9 +286,25 @@ autodl-remote history
 - Use `put/get/sync-up/sync-down` explicitly.
 - Keep large models, datasets, checkpoints, and training outputs on AutoDL unless the user explicitly pulls them.
 - Use `exec --script` or `exec --stdin` for multi-line shell/Python snippets.
-- Use `job status` and `job tail` for detached training jobs created with `exec --detach --name`.
+- Use `job status`, `job tail`, and `job stop` for detached training jobs created with `exec --detach --name`. Active names are rejected unless `exec --replace` explicitly stops the old job first.
+- Non-following `job tail` / `run tail` normalizes carriage-return progress records, strips ANSI CSI sequences, and caps output at 64 KiB before returning the last requested logical lines.
 - Use `exec --tmux --name` when live pane output matters, especially for long tasks, parallel runs, or multiple hosts.
 - Use `fleet` and `dashboard` for multi-device visibility; the dashboard is display-only.
 - Use `dashboard --watch <seconds> --lines <n>` when the user wants to watch remote logs without spending chat tokens.
 - Use run metadata flags (`--model`, `--tag`, `--stage`, `--purpose`) when Codex launches experiments so later dashboards are understandable.
 - Use `shutdown` instead of guessing provider-specific poweroff commands.
+
+## Runtime Bounds
+
+The following positive-integer environment variables override connection and log-output defaults:
+
+```bash
+AUTODL_REMOTE_TAIL_MAX_BYTES=65536
+AUTODL_REMOTE_CONNECT_TIMEOUT=10
+AUTODL_REMOTE_CONNECTION_ATTEMPTS=2
+AUTODL_REMOTE_MONITOR_TIMEOUT=30
+# Optional; when unset, it follows the full master-start budget and is at least 60s.
+# AUTODL_REMOTE_MASTER_LOCK_TIMEOUT=60
+```
+
+Timeout values are seconds. The automatic master-lock timeout is `max(60, 2 * ConnectTimeout * ConnectionAttempts + 5)`. The monitor timeout applies to short captured calls such as status checks and non-following log snapshots; long-running foreground commands and `--follow` remain streaming operations.

@@ -80,8 +80,10 @@ autodl-remote exec --script scripts/remote_check.sh
 cat scripts/remote_check.sh | autodl-remote exec --stdin -- bash
 autodl-remote job list
 autodl-remote job status train
-autodl-remote job tail train
+autodl-remote job tail train --lines 120
+autodl-remote job stop train
 autodl-remote run list
+autodl-remote run stop train
 autodl-remote run note train --stage evaluating
 autodl-remote fleet create rag-exp
 autodl-remote fleet add rag-exp nmb1 --account autodl-nmb1 --remote /root/autodl-tmp/LLM-RAG --tags a800,rag
@@ -102,9 +104,9 @@ autodl-remote shutdown
 - If both local and remote have similar files, do not assume one should overwrite the other. Compare or inspect first, then choose `put` or `get`.
 - Use `exec --detach` for long training jobs and then `tail` the log path.
 - Use `exec --tmux --name <run>` when live pane visibility matters, when several experiments run in parallel, or when multiple hosts need clearer terminal-state monitoring.
-- Prefer `job status <name>` and `job tail <name>` for detached jobs created with `--name`.
+- Prefer `job status <name>`, `job tail <name>`, and `job stop <name>` for detached jobs created with `--name`. Do not reuse an active name unless `exec --replace` explicitly stops the recorded job first.
 - Prefer `tmux capture <name>` for tmux-backed jobs when the user asks what the remote terminal currently shows.
-- Prefer `run list`, `run status`, `run tail`, and `run note` when the user is thinking in terms of experiments/models rather than raw jobs.
+- Prefer `run list`, `run status`, `run tail`, `run stop`, and `run note` when the user is thinking in terms of experiments/models rather than raw jobs.
 - For multiple machines, use `fleet add/list/status` by default. Use `dashboard --fleet <name>` only after the user asks for a dashboard, overview, or live monitoring.
 - When inspecting a non-default fleet device, pass `--account` and `--remote` to `tree`, `ls`, `cat`, `tail`, `put`, `get`, and `exec` instead of rebinding the project.
 - The dashboard is read-only and can be used for one device or many devices. Do not add operational assumptions just because the dashboard exists.

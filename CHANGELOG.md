@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.8.1
+
+- Added `job stop <name>` and `run stop <name>` for detached-job lifecycle control. They terminate the isolated runner process group with `TERM` then `KILL`, and record `status=cancelled`.
+- Reject active detached-job name collisions by default. `exec --replace --name <name>` now stops the recorded job before launching its replacement.
+- Fixed detached direct-command argv quoting so literal arguments (including `<|endoftext|>`) are preserved instead of being re-parsed by a shell.
+- Mark a recorded `running` job as `lost` when its runner PID is gone, with a recovery hint; `run list` uses the same status normalization.
+- Made `job tail <name> --lines N` and `run tail <name> --lines N` equivalent to the existing option-first form, and reject unknown trailing arguments.
+- Fixed `job tail --lines N`, `run tail`, and dashboard log previews for tqdm-style carriage-return progress by normalizing logical records and removing ANSI CSI sequences before selecting the final lines.
+- Limited non-following normalized log output to 64 KiB by default so one oversized progress record cannot flood a tool result.
+- Serialized only SSH ControlMaster creation per account/target, added stale socket and lock recovery, and retried a failed initial master connection once.
+- Added explicit SSH connection, monitoring, and keychain/Expect timeout bounds while keeping long-running non-monitoring sessions unbounded.
+- Added deterministic CLI regressions for logical log tails, output bounds, concurrent cold starts, stale connection state, retry behavior, and timeout cleanup.
+
 ## 0.8.0
 
 - Added optional tmux backend for long-running remote jobs with `exec --tmux --name <run> -- <command>`.

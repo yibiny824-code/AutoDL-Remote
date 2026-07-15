@@ -2,13 +2,18 @@
 set -u
 
 PROGRAM="autodl-remote"
-PROGRAM_VERSION="0.8.0"
+PROGRAM_VERSION="0.8.1"
 APP_DIR="$HOME/.autodl-remote"
 ACCOUNTS_DIR="$APP_DIR/accounts"
 DEFAULT_ACCOUNT_FILE="$APP_DIR/default-account"
 CONFIG_FILE=".autodl-remote.conf"
 HISTORY_DIR=".autodl-remote"
 KEYCHAIN_SERVICE="autodl-remote"
+TAIL_MAX_BYTES="${AUTODL_REMOTE_TAIL_MAX_BYTES:-65536}"
+SSH_CONNECT_TIMEOUT="${AUTODL_REMOTE_CONNECT_TIMEOUT:-10}"
+SSH_CONNECTION_ATTEMPTS="${AUTODL_REMOTE_CONNECTION_ATTEMPTS:-2}"
+SSH_MASTER_LOCK_TIMEOUT="${AUTODL_REMOTE_MASTER_LOCK_TIMEOUT:-}"
+SSH_MONITOR_TIMEOUT="${AUTODL_REMOTE_MONITOR_TIMEOUT:-30}"
 
 die() {
   printf '%s: %s\n' "$PROGRAM" "$*" >&2
@@ -53,7 +58,7 @@ project:
   tmux kill [--account name] [--remote path] <session>
 
 remote:
-  exec [--account name] [--remote path] [--detach|--tmux] [--cwd path] [--name name] [--model name] [--tag k=v] [--stage stage] [--purpose text] [--script local_script] [--stdin] [--allow-dangerous] -- <command>
+  exec [--account name] [--remote path] [--detach|--tmux] [--cwd path] [--name name] [--replace] [--model name] [--tag k=v] [--stage stage] [--purpose text] [--script local_script] [--stdin] [--allow-dangerous] -- <command>
   put-run <local-path>... -- <command>
   put [--account name] [--remote path] <local-path> [remote-path]
   get [--account name] [--remote path] <remote-path> [local-path]
@@ -65,10 +70,12 @@ remote:
   tail [--account name] [--remote path] [--lines 120] [--follow] -- <remote-path>
   job list
   job status <name>
+  job stop <name>
   job tail [--lines 120] [--follow] <name>
   run submit [metadata/options] -- <command>
   run list
   run status <name>
+  run stop <name>
   run tail [--lines 120] [--follow] <name>
   run note <name> [--model name] [--tag k=v] [--stage stage] [--purpose text] [--output path]
   shutdown [--wait seconds]
@@ -84,6 +91,14 @@ cmd_version() {
 
 shell_quote() {
   printf '%q' "$1"
+}
+
+shell_quote_argv() {
+  local arg output=""
+  for arg in "$@"; do
+    output="${output:+$output }$(shell_quote "$arg")"
+  done
+  printf '%s' "$output"
 }
 
 strip_quotes() {
@@ -257,7 +272,7 @@ job_path() {
 }
 
 write_job() {
-  local name="$1" pid="$2" log="$3" status_path="$4" cwd="$5" command="$6" model="${7:-}" tags="${8:-}" purpose="${9:-}" stage="${10:-}" outputs="${11:-}" backend="${12:-detach}" tmux_session="${13:-}" tmux_socket="${14:-}" file
+  local name="$1" pid="$2" log="$3" status_path="$4" cwd="$5" command="$6" model="${7:-}" tags="${8:-}" purpose="${9:-}" stage="${10:-}" outputs="${11:-}" backend="${12:-detach}" tmux_session="${13:-}" tmux_socket="${14:-}" process_group="${15:-false}" file
   mkdir -p "$(jobs_dir)"
   file="$(job_path "$name")"
   cat > "$file" <<EOF
@@ -278,6 +293,7 @@ OUTPUTS="$(config_quote "$outputs")"
 BACKEND="$(config_quote "$backend")"
 TMUX_SESSION="$(config_quote "$tmux_session")"
 TMUX_SOCKET="$(config_quote "$tmux_socket")"
+PROCESS_GROUP="$(config_quote "$process_group")"
 EOF
 }
 
@@ -353,24 +369,36 @@ apply_job_context() {
   apply_context_override "$account" "$remote"
 }
 
-job_remote_status_summary() {
-  local file="$1" pid status_path output rc status alive
-  apply_job_context "$file"
-  pid="$(job_get "$file" PID)"
-  status_path="$(job_get "$file" STATUS_PATH)"
-  output="$(ssh_capture "if [ -f $(shell_quote "$status_path") ]; then cat $(shell_quote "$status_path"); elif kill -0 $(shell_quote "$pid") 2>/dev/null; then printf 'status=running\npid=%s\n' $(shell_quote "$pid"); else printf 'status=unknown\npid=%s\n' $(shell_quote "$pid"); fi; if kill -0 $(shell_quote "$pid") 2>/dev/null; then echo alive=yes; else echo alive=no; fi" 2>/dev/null)"
-  rc=$?
-  if [ "$rc" -ne 0 ]; then
-    printf 'unreachable\n'
-    return 0
-  fi
+job_status_payload() {
+  local pid="$1" status_path="$2"
+  ssh_capture "if [ -f $(shell_quote "$status_path") ]; then cat $(shell_quote "$status_path"); elif kill -0 $(shell_quote "$pid") 2>/dev/null; then printf 'status=running\npid=%s\n' $(shell_quote "$pid"); else printf 'status=unknown\npid=%s\n' $(shell_quote "$pid"); fi; if kill -0 $(shell_quote "$pid") 2>/dev/null; then echo alive=yes; else echo alive=no; fi"
+}
+
+job_status_from_payload() {
+  local output="$1" status alive
   status="$(printf '%s\n' "$output" | awk -F= '$1=="status"{print $2; exit}')"
   alive="$(printf '%s\n' "$output" | awk -F= '$1=="alive"{print $2; exit}')"
   [ -n "$status" ] || status="unknown"
   if [ "$alive" = "yes" ] && [ "$status" = "unknown" ]; then
     status="running"
+  elif [ "$alive" = "no" ] && [ "$status" = "running" ]; then
+    status="lost"
   fi
   printf '%s\n' "$status"
+}
+
+job_remote_status_summary() {
+  local file="$1" pid status_path output rc
+  apply_job_context "$file"
+  pid="$(job_get "$file" PID)"
+  status_path="$(job_get "$file" STATUS_PATH)"
+  output="$(job_status_payload "$pid" "$status_path" 2>/dev/null)"
+  rc=$?
+  if [ "$rc" -ne 0 ]; then
+    printf 'unreachable\n'
+    return 0
+  fi
+  job_status_from_payload "$output"
 }
 
 remote_probe() {
@@ -457,11 +485,13 @@ load_project() {
 }
 
 ssh_common_args() {
-  local control_path
+  local control_master="${1:-no}" control_path
   control_path="$(ssh_control_path)"
-  SSH_ARGS=(-p "$ACCOUNT_PORT" -o ServerAliveInterval=30 -o ServerAliveCountMax=3 -o StrictHostKeyChecking=accept-new -o ControlMaster=auto -o ControlPersist=600 -o "ControlPath=$control_path")
+  validate_ssh_timeouts
+  SSH_ARGS=(-p "$ACCOUNT_PORT" -o "ConnectTimeout=$SSH_CONNECT_TIMEOUT" -o "ConnectionAttempts=$SSH_CONNECTION_ATTEMPTS" -o ServerAliveInterval=30 -o ServerAliveCountMax=3 -o StrictHostKeyChecking=accept-new -o "ControlMaster=$control_master" -o "ControlPath=$control_path")
+  [ "$control_master" != "yes" ] || SSH_ARGS+=(-o ControlPersist=600)
   [ -n "$ACCOUNT_KEY" ] && SSH_ARGS+=(-i "$ACCOUNT_KEY")
-  if [ "$ACCOUNT_AUTH" != "keychain" ] && [ "$ACCOUNT_AUTH" != "prompt" ]; then
+  if [ "$control_master" != "yes" ] || { [ "$ACCOUNT_AUTH" != "keychain" ] && [ "$ACCOUNT_AUTH" != "prompt" ]; }; then
     SSH_ARGS+=(-o BatchMode=yes)
   fi
 }
@@ -469,21 +499,19 @@ ssh_common_args() {
 scp_common_args() {
   local control_path
   control_path="$(ssh_control_path)"
-  SCP_ARGS=(-P "$ACCOUNT_PORT" -o ServerAliveInterval=30 -o ServerAliveCountMax=3 -o StrictHostKeyChecking=accept-new -o ControlMaster=auto -o ControlPersist=600 -o "ControlPath=$control_path")
+  validate_ssh_timeouts
+  SCP_ARGS=(-P "$ACCOUNT_PORT" -o "ConnectTimeout=$SSH_CONNECT_TIMEOUT" -o "ConnectionAttempts=$SSH_CONNECTION_ATTEMPTS" -o ServerAliveInterval=30 -o ServerAliveCountMax=3 -o StrictHostKeyChecking=accept-new -o ControlMaster=no -o "ControlPath=$control_path")
   [ -n "$ACCOUNT_KEY" ] && SCP_ARGS+=(-i "$ACCOUNT_KEY")
-  if [ "$ACCOUNT_AUTH" != "keychain" ] && [ "$ACCOUNT_AUTH" != "prompt" ]; then
-    SCP_ARGS+=(-o BatchMode=yes)
-  fi
+  SCP_ARGS+=(-o BatchMode=yes)
 }
 
 rsync_ssh_command() {
   local cmd control_path
   control_path="$(ssh_control_path)"
-  cmd="ssh -p $(shell_quote "$ACCOUNT_PORT") -o ServerAliveInterval=30 -o ServerAliveCountMax=3 -o StrictHostKeyChecking=accept-new -o ControlMaster=auto -o ControlPersist=600 -o ControlPath=$(shell_quote "$control_path")"
+  validate_ssh_timeouts
+  cmd="ssh -p $(shell_quote "$ACCOUNT_PORT") -o ConnectTimeout=$(shell_quote "$SSH_CONNECT_TIMEOUT") -o ConnectionAttempts=$(shell_quote "$SSH_CONNECTION_ATTEMPTS") -o ServerAliveInterval=30 -o ServerAliveCountMax=3 -o StrictHostKeyChecking=accept-new -o ControlMaster=no -o ControlPath=$(shell_quote "$control_path")"
   [ -n "$ACCOUNT_KEY" ] && cmd="$cmd -i $(shell_quote "$ACCOUNT_KEY")"
-  if [ "$ACCOUNT_AUTH" != "keychain" ] && [ "$ACCOUNT_AUTH" != "prompt" ]; then
-    cmd="$cmd -o BatchMode=yes"
-  fi
+  cmd="$cmd -o BatchMode=yes"
   printf '%s\n' "$cmd"
 }
 
@@ -496,8 +524,115 @@ ssh_control_dir() {
 }
 
 ssh_control_path() {
-  printf '%s/ssh-%%C\n' "$(ssh_control_dir)"
+  local account_id connection_id
+  account_id="$(printf '%s\n' "$ACCOUNT_NAME" | cksum | awk '{print $1}')"
+  connection_id="$(printf '%s\n' "$ACCOUNT_TARGET:$ACCOUNT_PORT" | cksum | awk '{print $1}')"
+  printf '%s/ssh-%s-%s\n' "$(ssh_control_dir)" "$account_id" "$connection_id"
 }
+
+validate_ssh_timeouts() {
+  case "$SSH_CONNECT_TIMEOUT" in
+    ""|0|*[!0-9]*) die "AUTODL_REMOTE_CONNECT_TIMEOUT must be a positive integer" ;;
+  esac
+  case "$SSH_CONNECTION_ATTEMPTS" in
+    ""|0|*[!0-9]*) die "AUTODL_REMOTE_CONNECTION_ATTEMPTS must be a positive integer" ;;
+  esac
+  case "$SSH_MASTER_LOCK_TIMEOUT" in
+    "") ;;
+    0|*[!0-9]*) die "AUTODL_REMOTE_MASTER_LOCK_TIMEOUT must be a positive integer" ;;
+  esac
+  case "$SSH_MONITOR_TIMEOUT" in
+    ""|0|*[!0-9]*) die "AUTODL_REMOTE_MONITOR_TIMEOUT must be a positive integer" ;;
+  esac
+}
+
+ssh_master_lock_timeout() {
+  local minimum
+  if [ -n "$SSH_MASTER_LOCK_TIMEOUT" ]; then
+    printf '%s\n' "$SSH_MASTER_LOCK_TIMEOUT"
+    return 0
+  fi
+  minimum=$((SSH_CONNECT_TIMEOUT * SSH_CONNECTION_ATTEMPTS * 2 + 5))
+  [ "$minimum" -ge 60 ] || minimum=60
+  printf '%s\n' "$minimum"
+}
+
+path_mtime() {
+  stat -f '%m' "$1" 2>/dev/null || stat -c '%Y' "$1" 2>/dev/null
+}
+
+ssh_master_check() {
+  local control_path
+  control_path="$(ssh_control_path)"
+  ssh -p "$ACCOUNT_PORT" -o "ConnectTimeout=$SSH_CONNECT_TIMEOUT" -o ControlMaster=no -o "ControlPath=$control_path" -O check "$ACCOUNT_TARGET" >/dev/null 2>&1
+}
+
+acquire_ssh_master_lock() {
+  local lock_dir="$1" started now owner owner_command lock_mtime lock_timeout
+  started="$(date +%s)"
+  lock_timeout="$(ssh_master_lock_timeout)"
+  while ! mkdir "$lock_dir" 2>/dev/null; do
+    if [ -f "$lock_dir/pid" ]; then
+      owner="$(sed -n '1p' "$lock_dir/pid" 2>/dev/null || true)"
+      case "$owner" in
+        ""|*[!0-9]*) owner="" ;;
+        *)
+          owner_command="$(ps -p "$owner" -o command= 2>/dev/null || true)"
+          if ! kill -0 "$owner" 2>/dev/null || [ -z "$owner_command" ] || [ "${owner_command#*autodl-remote}" = "$owner_command" ]; then
+            rm -rf "$lock_dir"
+            continue
+          fi
+          ;;
+      esac
+    else
+      owner=""
+    fi
+    if [ -z "$owner" ]; then
+      now="$(date +%s)"
+      lock_mtime="$(path_mtime "$lock_dir" || printf '%s\n' "$now")"
+      if [ $((now - lock_mtime)) -ge "$lock_timeout" ]; then
+        rm -rf "$lock_dir"
+        continue
+      fi
+    fi
+    now="$(date +%s)"
+    if [ $((now - started)) -ge "$lock_timeout" ]; then
+      printf '%s: timed out waiting for SSH master lock: %s\n' "$PROGRAM" "$lock_dir" >&2
+      return 1
+    fi
+    sleep 0.1
+  done
+  printf '%s\n' "$$" > "$lock_dir/pid.tmp"
+  mv "$lock_dir/pid.tmp" "$lock_dir/pid"
+}
+
+ensure_ssh_master() (
+  local control_path lock_dir attempt rc=1
+  validate_ssh_timeouts
+  ssh_master_check && return 0
+  control_path="$(ssh_control_path)"
+  lock_dir="$control_path.lock"
+  acquire_ssh_master_lock "$lock_dir" || return 1
+  trap 'rm -rf "$lock_dir"' EXIT
+  trap 'exit 129' HUP
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+  ssh_master_check && return 0
+
+  for attempt in 1 2; do
+    rm -f "$control_path"
+    ssh_common_args yes
+    if run_transport_timed "$SSH_CONNECT_TIMEOUT" ssh -MNf "${SSH_ARGS[@]}" "$ACCOUNT_TARGET"; then
+      ssh_master_check && return 0
+    else
+      rc=$?
+    fi
+    ssh_master_check && return 0
+    sleep 0.2
+  done
+  printf '%s: failed to establish shared SSH master for %s\n' "$PROGRAM" "$ACCOUNT_NAME" >&2
+  return "$rc"
+)
 
 keychain_password() {
   command -v security >/dev/null 2>&1 || die "macOS security command is not available."
@@ -506,10 +641,10 @@ keychain_password() {
 
 expect_with_password() {
   command -v expect >/dev/null 2>&1 || die "Account uses keychain auth, but expect is not available."
-  local password="$1"
-  shift
-  AUTODL_REMOTE_PASSWORD="$password" expect -f /dev/stdin "$@" <<'EXPECT'
-    set timeout -1
+  local password="$1" timeout_seconds="$2"
+  shift 2
+  AUTODL_REMOTE_PASSWORD="$password" AUTODL_REMOTE_EXPECT_TIMEOUT="$timeout_seconds" expect -f /dev/stdin "$@" <<'EXPECT'
+    set timeout $env(AUTODL_REMOTE_EXPECT_TIMEOUT)
     set password $env(AUTODL_REMOTE_PASSWORD)
     log_user 0
     spawn {*}$argv
@@ -517,15 +652,23 @@ expect_with_password() {
     expect {
       -nocase -re "are you sure.*continue connecting" {
         send "yes\r"
-        exp_continue
+        exp_continue -continue_timer
       }
       -nocase -re "yes/no" {
         send "yes\r"
-        exp_continue
+        exp_continue -continue_timer
       }
       -nocase -re "password:" {
         send "$password\r"
-        exp_continue
+        exp_continue -continue_timer
+      }
+      timeout {
+        puts stderr "autodl-remote: SSH transport timed out"
+        set child_pid [exp_pid]
+        catch {close}
+        catch {exec kill -TERM $child_pid}
+        catch {wait}
+        exit 124
       }
       eof
     }
@@ -534,11 +677,108 @@ expect_with_password() {
 EXPECT
 }
 
-run_transport() {
+terminate_descendants() {
+  local parent="$1" signal="$2" child children
+  command -v pgrep >/dev/null 2>&1 || return 0
+  children="$(pgrep -P "$parent" 2>/dev/null || true)"
+  for child in $children; do
+    terminate_descendants "$child" "$signal"
+  done
+  for child in $children; do
+    kill "-$signal" "$child" 2>/dev/null || true
+  done
+}
+
+terminate_process_tree() {
+  local pid="$1" signal="$2" process_group="$3"
+  kill -0 "$pid" 2>/dev/null || return 0
+  if [ "$process_group" = "true" ]; then
+    kill "-$signal" -- "-$pid" 2>/dev/null || true
+  else
+    terminate_descendants "$pid" "$signal"
+    kill "-$signal" "$pid" 2>/dev/null || true
+  fi
+}
+
+run_command_with_timeout() (
+  local timeout_seconds="$1" pid="" watchdog="" sleeper="" marker="" timer_pid_file="" rc process_group=false
+  shift
+  cleanup_timeout_runner() {
+    if [ -n "$pid" ]; then
+      terminate_process_tree "$pid" TERM "$process_group"
+      sleep 0.1
+      terminate_process_tree "$pid" KILL "$process_group"
+    fi
+    [ -z "$sleeper" ] || kill "$sleeper" 2>/dev/null || true
+    [ -z "$watchdog" ] || kill "$watchdog" 2>/dev/null || true
+    [ -z "$marker" ] || rm -f "$marker"
+    [ -z "$timer_pid_file" ] || rm -f "$timer_pid_file"
+  }
+  trap cleanup_timeout_runner EXIT
+  trap 'exit 129' HUP
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+
+  marker="$(mktemp "${TMPDIR:-/tmp}/autodl-remote-timeout.XXXXXX")" || die "mktemp failed"
+  timer_pid_file="$(mktemp "${TMPDIR:-/tmp}/autodl-remote-timer.XXXXXX")" || { rm -f "$marker"; die "mktemp failed"; }
+  rm -f "$marker"
+  rm -f "$timer_pid_file"
+  if command -v setsid >/dev/null 2>&1; then
+    setsid "$@" &
+    process_group=true
+  else
+    "$@" &
+  fi
+  pid=$!
+  (
+    sleep "$timeout_seconds" &
+    sleeper=$!
+    printf '%s\n' "$sleeper" > "$timer_pid_file"
+    wait "$sleeper" || exit 0
+    if kill -0 "$pid" 2>/dev/null; then
+      : > "$marker"
+      terminate_process_tree "$pid" TERM "$process_group"
+      sleep 1
+      terminate_process_tree "$pid" KILL "$process_group"
+    fi
+  ) </dev/null >/dev/null 2>&1 &
+  watchdog=$!
+  wait "$pid"
+  rc=$?
+  pid=""
+  for _ in 1 2 3 4 5 6 7 8 9 10; do
+    [ -f "$timer_pid_file" ] && break
+    kill -0 "$watchdog" 2>/dev/null || break
+    sleep 0.01
+  done
+  if [ -f "$timer_pid_file" ]; then
+    sleeper="$(sed -n '1p' "$timer_pid_file" 2>/dev/null || true)"
+    case "$sleeper" in
+      ""|*[!0-9]*) ;;
+      *) kill "$sleeper" 2>/dev/null || true; sleeper="" ;;
+    esac
+  fi
+  kill "$watchdog" 2>/dev/null || true
+  wait "$watchdog" 2>/dev/null || true
+  watchdog=""
+  if [ -f "$marker" ]; then
+    printf '%s: transport timed out after %ss\n' "$PROGRAM" "$timeout_seconds" >&2
+    return 124
+  fi
+  return "$rc"
+)
+
+run_transport_timed() {
+  local timeout_seconds="$1" rc
+  shift
   if [ "$ACCOUNT_AUTH" = "keychain" ]; then
     local password
-    password="$(keychain_password)" || die "No Keychain password saved for account: $ACCOUNT_NAME"
-    expect_with_password "$password" "$@"
+    password="$(run_command_with_timeout "$timeout_seconds" keychain_password)"
+    rc=$?
+    [ "$rc" -eq 0 ] || { [ "$rc" -eq 124 ] && return 124; die "No Keychain password saved for account: $ACCOUNT_NAME"; }
+    expect_with_password "$password" "$timeout_seconds" "$@"
+  elif [ "$ACCOUNT_AUTH" = "ssh-key" ]; then
+    run_command_with_timeout "$timeout_seconds" "$@"
   else
     "$@"
   fi
@@ -546,15 +786,40 @@ run_transport() {
 
 ssh_run() {
   local command="$1"
+  ensure_ssh_master || return $?
   ssh_common_args
-  run_transport ssh "${SSH_ARGS[@]}" "$ACCOUNT_TARGET" "$command"
+  ssh "${SSH_ARGS[@]}" "$ACCOUNT_TARGET" "$command"
 }
 
 ssh_capture() {
   local command="$1"
+  ensure_ssh_master || return $?
   ssh_common_args
-  run_transport ssh "${SSH_ARGS[@]}" "$ACCOUNT_TARGET" "$command" | tr -d '\r'
-  return "${PIPESTATUS[0]}"
+  run_command_with_timeout "$SSH_MONITOR_TIMEOUT" ssh "${SSH_ARGS[@]}" "$ACCOUNT_TARGET" "$command"
+}
+
+validate_tail_settings() {
+  local lines="$1"
+  case "$lines" in
+    ""|*[!0-9]*) die "--lines must be a non-negative integer" ;;
+  esac
+  case "$TAIL_MAX_BYTES" in
+    ""|0|*[!0-9]*) die "AUTODL_REMOTE_TAIL_MAX_BYTES must be a positive integer" ;;
+  esac
+}
+
+normalized_tail_filter_command() {
+  local lines="$1" awk_program
+  awk_program='{ sub(/\r$/, ""); gsub(/\r/, "\n"); gsub(sprintf("%c", 27) "\\[[0-?]*[ -/]*[@-~]", ""); print }'
+  printf 'LC_ALL=C awk %s | tail -n %s | tail -c %s' \
+    "$(shell_quote "$awk_program")" "$lines" "$TAIL_MAX_BYTES"
+}
+
+normalized_log_tail_command() {
+  local log="$1" lines="$2" input_bytes
+  input_bytes=$((TAIL_MAX_BYTES * 4))
+  printf 'tail -c %s %s | %s' \
+    "$input_bytes" "$(shell_quote "$log")" "$(normalized_tail_filter_command "$lines")"
 }
 
 remote_join() {
@@ -614,15 +879,17 @@ upload_local_file() {
   local local_path="$1" remote_path="$2"
   [ -f "$local_path" ] || die "Local script does not exist or is not a file: $local_path"
   ensure_remote_dir "$(dirname "$remote_path")"
+  ensure_ssh_master || return $?
   scp_common_args
-  run_transport scp "${SCP_ARGS[@]}" "$local_path" "$ACCOUNT_TARGET:$remote_path"
+  scp "${SCP_ARGS[@]}" "$local_path" "$ACCOUNT_TARGET:$remote_path"
 }
 
 upload_stdin_to_remote() {
   local remote_path="$1"
   ensure_remote_dir "$(dirname "$remote_path")"
+  ensure_ssh_master || return $?
   ssh_common_args
-  run_transport ssh "${SSH_ARGS[@]}" "$ACCOUNT_TARGET" "cat > $(shell_quote "$remote_path")"
+  ssh "${SSH_ARGS[@]}" "$ACCOUNT_TARGET" "cat > $(shell_quote "$remote_path")"
 }
 
 upload_file_via_ssh() {
@@ -643,7 +910,7 @@ remote_tmux_capture() {
   local session="$1" socket="$2" lines="$3" output rc
   [ -n "$session" ] || { printf '[tmux session missing]\n'; return 1; }
   [ -n "$socket" ] || socket="$(tmux_socket_path)"
-  output="$(ssh_capture "if ! command -v tmux >/dev/null 2>&1; then printf '%s\n' $(shell_quote "$(tmux_missing_text)"); exit 127; fi; if tmux -S $(shell_quote "$socket") has-session -t $(shell_quote "$session") 2>/dev/null; then tmux -S $(shell_quote "$socket") capture-pane -p -J -t $(shell_quote "$session:0.0") -S -$lines; else printf '[tmux session missing] %s\n' $(shell_quote "$session"); exit 42; fi" 2>&1)"
+  output="$(ssh_capture "if ! command -v tmux >/dev/null 2>&1; then printf '%s\n' $(shell_quote "$(tmux_missing_text)"); exit 127; fi; if tmux -S $(shell_quote "$socket") has-session -t $(shell_quote "$session") 2>/dev/null; then tmux -S $(shell_quote "$socket") capture-pane -p -J -t $(shell_quote "$session:0.0") -S -$lines | $(normalized_tail_filter_command "$lines"); else printf '[tmux session missing] %s\n' $(shell_quote "$session"); exit 42; fi" 2>&1)"
   rc=$?
   printf '%s\n' "$output"
   return "$rc"
@@ -979,7 +1246,7 @@ cmd_doctor() {
 
 cmd_exec() {
   load_project
-  local detach=false tmux_mode=false cwd="" cwd_arg="" name="" allow_dangerous=false script="" stdin_mode=false remote_script=""
+  local detach=false tmux_mode=false cwd="" cwd_arg="" name="" replace=false allow_dangerous=false script="" stdin_mode=false remote_script=""
   local account_override="" remote_override="" model="" tags="" purpose="" stage="" outputs=""
   while [ $# -gt 0 ]; do
     case "$1" in
@@ -989,6 +1256,7 @@ cmd_exec() {
       --tmux) tmux_mode=true; detach=true; shift ;;
       --cwd) cwd_arg="$2"; shift 2 ;;
       --name) name="$2"; shift 2 ;;
+      --replace) replace=true; shift ;;
       --model) model="$2"; shift 2 ;;
       --tag) tags="$(append_csv "$tags" "$2")"; shift 2 ;;
       --purpose) purpose="$2"; shift 2 ;;
@@ -1018,7 +1286,7 @@ cmd_exec() {
       upload_file_via_ssh "$local_script" "$remote_script" || return 1
     fi
     if [ $# -gt 0 ]; then
-      cmd="$* $(shell_quote "$remote_script")"
+      cmd="$(shell_quote_argv "$@") $(shell_quote "$remote_script")"
     else
       cmd="bash $(shell_quote "$remote_script")"
     fi
@@ -1035,10 +1303,10 @@ cmd_exec() {
     else
       upload_stdin_to_remote "$remote_script" || return 1
     fi
-    cmd="$* < $(shell_quote "$remote_script")"
+    cmd="$(shell_quote_argv "$@") < $(shell_quote "$remote_script")"
   else
     [ $# -gt 0 ] || die "exec requires a command"
-    cmd="$*"
+    cmd="$(shell_quote_argv "$@")"
   fi
 
   if [ "$allow_dangerous" != "true" ]; then
@@ -1046,6 +1314,27 @@ cmd_exec() {
   fi
   [ -n "$name" ] || name="exec-$(date +%Y%m%d-%H%M%S)"
   name="$(sanitize_name "$name")"
+  local existing_file existing_status
+  existing_file="$(job_path "$name")"
+  if [ -f "$existing_file" ]; then
+    existing_status="$(job_remote_status_summary "$existing_file")"
+    case "$existing_status" in
+      running|lost)
+        if [ "$replace" != "true" ]; then
+          die "Job name is already active: $name (status=$existing_status). Use --replace to stop it before submitting a replacement."
+        fi
+        info "Replacing existing job: $name (status=$existing_status)"
+        cmd_job_stop "$name" || return $?
+        apply_context_override "$account_override" "$remote_override"
+        ;;
+      unreachable)
+        die "Cannot safely replace job $name because its remote status is unreachable."
+        ;;
+      *)
+        [ "$replace" != "true" ] || info "Replacing inactive job: $name (status=$existing_status)"
+        ;;
+    esac
+  fi
   local log="$REMOTE_ROOT/.autodl-remote/logs/$name.log"
   status_path="$REMOTE_ROOT/.autodl-remote/jobs/$name.status"
   info "log=$log"
@@ -1059,6 +1348,12 @@ set +e
 started_at=\$(date +%Y-%m-%dT%H:%M:%S%z)
 pid=\$BASHPID
 printf 'status=running\npid=%s\nstarted_at=%s\nlog=%s\ncwd=%s\n' "\$pid" "\$started_at" $(shell_quote "$log") $(shell_quote "$cwd") > $(shell_quote "$status_path")
+cancelled() {
+  finished_at=\$(date +%Y-%m-%dT%H:%M:%S%z)
+  printf 'status=cancelled\npid=%s\nstarted_at=%s\nfinished_at=%s\nexit_code=143\nlog=%s\ncwd=%s\n' "\$pid" "\$started_at" "\$finished_at" $(shell_quote "$log") $(shell_quote "$cwd") > $(shell_quote "$status_path")
+  exit 143
+}
+trap cancelled INT TERM
 if [ "\${AUTODL_REMOTE_TMUX:-}" = "1" ]; then
   cd $(shell_quote "$cwd") && bash -lc $(shell_quote "$cmd") 2>&1 | tee $(shell_quote "$log")
   rc=\${PIPESTATUS[0]}
@@ -1130,7 +1425,7 @@ EOF
       rm -f "$launcher_local"
       remote_cmd="bash $(shell_quote "$launcher")"
     else
-      remote_cmd="mkdir -p $(shell_quote "$(dirname "$log")") $(shell_quote "$(dirname "$status_path")") && chmod +x $(shell_quote "$runner") && if command -v setsid >/dev/null 2>&1; then setsid bash $(shell_quote "$runner") < /dev/null > /dev/null 2>&1 & else nohup bash $(shell_quote "$runner") < /dev/null > /dev/null 2>&1 & fi; printf 'pid=%s\nlog=%s\nstatus=%s\n' \"\$!\" $(shell_quote "$log") $(shell_quote "$status_path")"
+      remote_cmd="mkdir -p $(shell_quote "$(dirname "$log")") $(shell_quote "$(dirname "$status_path")") && chmod +x $(shell_quote "$runner") && if command -v setsid >/dev/null 2>&1; then setsid bash $(shell_quote "$runner") < /dev/null > /dev/null 2>&1 & process_group=yes; else nohup bash $(shell_quote "$runner") < /dev/null > /dev/null 2>&1 & process_group=no; fi; printf 'pid=%s\nlog=%s\nstatus=%s\nprocess_group=%s\n' \"\$!\" $(shell_quote "$log") $(shell_quote "$status_path") \"\$process_group\""
     fi
     result="$(ssh_capture "bash -lc $(shell_quote "$remote_cmd")" 2>&1)"
     detach_rc=$?
@@ -1139,8 +1434,11 @@ EOF
     pid="$(printf '%s\n' "$result" | awk -F= '$1=="pid"{print $2; exit}')"
     tmux_session="$(printf '%s\n' "$result" | awk -F= '$1=="tmux_session"{print $2; exit}')"
     tmux_socket="$(printf '%s\n' "$result" | awk -F= '$1=="tmux_socket"{print $2; exit}')"
+    local process_group
+    process_group="$(printf '%s\n' "$result" | awk -F= '$1=="process_group"{print $2; exit}')"
+    [ "$backend" != "tmux" ] || process_group=false
     [ -n "$pid" ] || die "Remote detach did not return a pid."
-    write_job "$name" "$pid" "$log" "$status_path" "$cwd" "$cmd" "$model" "$tags" "$purpose" "$stage" "$outputs" "$backend" "$tmux_session" "$tmux_socket"
+    write_job "$name" "$pid" "$log" "$status_path" "$cwd" "$cmd" "$model" "$tags" "$purpose" "$stage" "$outputs" "$backend" "$tmux_session" "$tmux_socket" "${process_group:-false}"
     write_history "exec-$backend" "$cmd log=$log"
   else
     local inner rc
@@ -1180,17 +1478,17 @@ cmd_put() {
     [ "$dry_run" = "true" ] && args+=(--dry-run)
     [ "$delete" = "true" ] && args+=(--delete)
     if [ -d "$local_path" ]; then
-      run_transport rsync "${args[@]}" "$local_path/" "$ACCOUNT_TARGET:$remote_path/"
+      rsync "${args[@]}" "$local_path/" "$ACCOUNT_TARGET:$remote_path/"
     else
-      run_transport rsync "${args[@]}" "$local_path" "$ACCOUNT_TARGET:$remote_path"
+      rsync "${args[@]}" "$local_path" "$ACCOUNT_TARGET:$remote_path"
     fi
   else
     [ "$dry_run" != "true" ] || die "dry-run requires rsync."
     scp_common_args
     if [ -d "$local_path" ]; then
-      run_transport scp -r "${SCP_ARGS[@]}" "$local_path" "$ACCOUNT_TARGET:$remote_path"
+      scp -r "${SCP_ARGS[@]}" "$local_path" "$ACCOUNT_TARGET:$remote_path"
     else
-      run_transport scp "${SCP_ARGS[@]}" "$local_path" "$ACCOUNT_TARGET:$remote_path"
+      scp "${SCP_ARGS[@]}" "$local_path" "$ACCOUNT_TARGET:$remote_path"
     fi
   fi
   write_history put "$local_arg -> $remote_path"
@@ -1227,17 +1525,17 @@ cmd_get() {
     [ "$dry_run" = "true" ] && args+=(--dry-run)
     if [ "$kind" = "dir" ]; then
       mkdir -p "$local_path"
-      run_transport rsync "${args[@]}" "$ACCOUNT_TARGET:$remote_path/" "$local_path/"
+      rsync "${args[@]}" "$ACCOUNT_TARGET:$remote_path/" "$local_path/"
     else
-      run_transport rsync "${args[@]}" "$ACCOUNT_TARGET:$remote_path" "$local_path"
+      rsync "${args[@]}" "$ACCOUNT_TARGET:$remote_path" "$local_path"
     fi
   else
     [ "$dry_run" != "true" ] || die "dry-run requires rsync."
     scp_common_args
     if [ "$kind" = "dir" ]; then
-      run_transport scp -r "${SCP_ARGS[@]}" "$ACCOUNT_TARGET:$remote_path" "$local_path"
+      scp -r "${SCP_ARGS[@]}" "$ACCOUNT_TARGET:$remote_path" "$local_path"
     else
-      run_transport scp "${SCP_ARGS[@]}" "$ACCOUNT_TARGET:$remote_path" "$local_path"
+      scp "${SCP_ARGS[@]}" "$ACCOUNT_TARGET:$remote_path" "$local_path"
     fi
   fi
   write_history get "$remote_path -> $local_arg"
@@ -1341,7 +1639,7 @@ cmd_job_list() {
 
 cmd_job_status() {
   load_project
-  [ $# -gt 0 ] || die "job status requires a name"
+  [ $# -eq 1 ] || die "job status requires exactly one name"
   local name file pid log status_path cwd command backend tmux_session tmux_socket remote_status rc
   name="$(sanitize_name "$1")"
   file="$(job_path "$name")"
@@ -1368,10 +1666,15 @@ cmd_job_status() {
   info "log=$log"
   info "status_path=$status_path"
   info "command=$command"
-  remote_status="$(ssh_capture "if [ -f $(shell_quote "$status_path") ]; then cat $(shell_quote "$status_path"); elif kill -0 $(shell_quote "$pid") 2>/dev/null; then printf 'status=running\npid=%s\n' $(shell_quote "$pid"); else printf 'status=unknown\npid=%s\n' $(shell_quote "$pid"); fi; if kill -0 $(shell_quote "$pid") 2>/dev/null; then echo alive=yes; else echo alive=no; fi" 2>&1)"
+  remote_status="$(job_status_payload "$pid" "$status_path" 2>&1)"
   rc=$?
   if [ "$rc" -eq 0 ]; then
-    printf '%s\n' "$remote_status"
+    if [ "$(job_status_from_payload "$remote_status")" = "lost" ]; then
+      printf '%s\n' "$remote_status" | awk -F= '$1 == "status" { print "status=lost"; next } { print }'
+      info "hint=runner pid is not alive; run job stop $name to terminate any surviving process-group children, then submit a replacement if needed"
+    else
+      printf '%s\n' "$remote_status"
+    fi
   else
     info "remote_status=unreachable"
     printf '%s\n' "$remote_status" >&2
@@ -1379,20 +1682,81 @@ cmd_job_status() {
   fi
 }
 
+cmd_job_stop() {
+  load_project
+  [ $# -eq 1 ] || die "job stop requires exactly one name"
+  local name file pid log status_path cwd backend tmux_session tmux_socket process_group current_status group_probe remote_cmd output rc
+  name="$(sanitize_name "$1")"
+  file="$(job_path "$name")"
+  [ -f "$file" ] || die "Job not found: $name"
+  pid="$(job_get "$file" PID)"
+  log="$(job_get "$file" LOG_PATH)"
+  status_path="$(job_get "$file" STATUS_PATH)"
+  cwd="$(job_get "$file" CWD)"
+  backend="$(job_get "$file" BACKEND)"
+  tmux_session="$(job_get "$file" TMUX_SESSION)"
+  tmux_socket="$(job_get "$file" TMUX_SOCKET)"
+  process_group="$(job_get "$file" PROCESS_GROUP)"
+  [ -n "$pid" ] || die "Job has no recorded pid: $name"
+  apply_job_context "$file"
+  current_status="$(job_remote_status_summary "$file")"
+  case "$current_status" in
+    exited|cancelled)
+      info "status=$current_status"
+      info "Job is already complete; its recorded status was not changed."
+      return 0
+      ;;
+    unreachable)
+      die "Cannot safely stop job $name because its remote status is unreachable."
+      ;;
+  esac
+
+  if [ "${backend:-detach}" = "tmux" ]; then
+    [ -n "$tmux_session" ] && [ -n "$tmux_socket" ] || die "tmux job has incomplete session metadata: $name"
+    remote_cmd="tmux -S $(shell_quote "$tmux_socket") kill-session -t $(shell_quote "$tmux_session") 2>/dev/null || true; finished_at=\$(date +%Y-%m-%dT%H:%M:%S%z); printf 'status=cancelled\npid=%s\nfinished_at=%s\nexit_code=143\nlog=%s\ncwd=%s\n' $(shell_quote "$pid") \"\$finished_at\" $(shell_quote "$log") $(shell_quote "$cwd") > $(shell_quote "$status_path"); printf 'status=cancelled\npid=%s\nbackend=tmux\n' $(shell_quote "$pid")"
+  else
+    if [ -z "$process_group" ]; then
+      group_probe="$(ssh_capture "pid=$(shell_quote "$pid"); pgid=\$(ps -o pgid= -p \"\$pid\" 2>/dev/null | tr -d '[:space:]'); if [ -n \"\$pgid\" ]; then [ \"\$pgid\" = \"\$pid\" ] && echo yes || echo no; elif kill -0 -- -\"\$pid\" 2>/dev/null; then echo yes; else echo no; fi" 2>/dev/null)" || return $?
+      [ "$group_probe" = "yes" ] || die "Legacy job $name is not an isolated process group, so it cannot be stopped safely."
+      process_group=yes
+    fi
+    [ "$process_group" = "yes" ] || die "Job $name was not launched in an isolated process group, so it cannot be stopped safely."
+    remote_cmd="pid=$(shell_quote "$pid"); status_path=$(shell_quote "$status_path"); log=$(shell_quote "$log"); cwd=$(shell_quote "$cwd"); group_alive() { if command -v ps >/dev/null 2>&1; then ps -eo pgid=,stat= 2>/dev/null | awk -v pgid=\"\$pid\" '\$1 == pgid && \$2 !~ /^Z/ { found=1 } END { exit !found }'; else kill -0 -- -\"\$pid\" 2>/dev/null; fi; }; if group_alive; then kill -TERM -- -\"\$pid\" || exit 1; for _ in 1 2 3 4 5; do group_alive || break; sleep 1; done; if group_alive; then kill -KILL -- -\"\$pid\" || exit 1; for _ in 1 2 3 4 5; do group_alive || break; sleep 1; done; fi; group_alive && { echo 'autodl-remote: process group remained alive after TERM and KILL' >&2; exit 1; }; fi; finished_at=\$(date +%Y-%m-%dT%H:%M:%S%z); printf 'status=cancelled\npid=%s\nfinished_at=%s\nexit_code=143\nlog=%s\ncwd=%s\n' \"\$pid\" \"\$finished_at\" \"\$log\" \"\$cwd\" > \"\$status_path\"; printf 'status=cancelled\npid=%s\nbackend=detach\n' \"\$pid\""
+  fi
+  output="$(ssh_capture "bash -lc $(shell_quote "$remote_cmd")" 2>&1)"
+  rc=$?
+  if [ "$rc" -eq 0 ]; then
+    printf '%s\n' "$output"
+  else
+    printf '%s\n' "$output" >&2
+    return "$rc"
+  fi
+}
+
 cmd_job_tail() {
   load_project
-  local lines=120 follow=false
+  local lines=120 follow=false name=""
   while [ $# -gt 0 ]; do
     case "$1" in
       --lines) lines="$2"; shift 2 ;;
       --follow|-f) follow=true; shift ;;
-      --) shift; break ;;
-      *) break ;;
+      --)
+        shift
+        [ -z "$name" ] && [ $# -gt 0 ] && { name="$1"; shift; }
+        [ $# -eq 0 ] || die "unknown job tail argument: $1"
+        break
+        ;;
+      *)
+        [ -z "$name" ] || die "unknown job tail argument: $1"
+        name="$1"
+        shift
+        ;;
     esac
   done
-  [ $# -gt 0 ] || die "job tail requires a name"
-  local name file log backend tmux_session tmux_socket flag=""
-  name="$(sanitize_name "$1")"
+  validate_tail_settings "$lines"
+  [ -n "$name" ] || die "job tail requires a name"
+  local file log backend tmux_session tmux_socket flag=""
+  name="$(sanitize_name "$name")"
   file="$(job_path "$name")"
   [ -f "$file" ] || die "Job not found: $name"
   log="$(job_get "$file" LOG_PATH)"
@@ -1405,7 +1769,11 @@ cmd_job_tail() {
     info "tmux capture failed; falling back to log tail."
   fi
   [ "$follow" = "true" ] && flag="-f"
-  ssh_run "tail -n $lines $flag $(shell_quote "$log")"
+  if [ "$follow" = "true" ]; then
+    ssh_run "tail -n $lines $flag $(shell_quote "$log")"
+  else
+    ssh_run "$(normalized_log_tail_command "$log" "$lines")"
+  fi
 }
 
 cmd_job() {
@@ -1415,6 +1783,7 @@ cmd_job() {
   case "$sub" in
     list|ls) cmd_job_list "$@" ;;
     status) cmd_job_status "$@" ;;
+    stop) cmd_job_stop "$@" ;;
     tail) cmd_job_tail "$@" ;;
     *) die "unknown job command: $sub" ;;
   esac
@@ -1518,6 +1887,7 @@ cmd_run() {
     submit) cmd_run_submit "$@" ;;
     list|ls) cmd_run_list "$@" ;;
     status) cmd_job_status "$@" ;;
+    stop) cmd_job_stop "$@" ;;
     tail) cmd_job_tail "$@" ;;
     note) cmd_run_note "$@" ;;
     *) die "unknown run command: $sub" ;;
@@ -1666,7 +2036,7 @@ remote_log_tail() {
   load_account "$account"
   REMOTE_ROOT="${remote%/}"
   validate_remote_root "$REMOTE_ROOT"
-  output="$(ssh_capture "if [ -f $(shell_quote "$log") ]; then tail -n $lines $(shell_quote "$log"); else printf '[log missing] %s\n' $(shell_quote "$log"); fi" 2>&1)"
+  output="$(ssh_capture "if [ -f $(shell_quote "$log") ]; then $(normalized_log_tail_command "$log" "$lines"); else printf '[log missing] %s\n' $(shell_quote "$log"); fi" 2>&1)"
   rc=$?
   if [ "$rc" -eq 0 ]; then
     printf '%s\n' "$output"
@@ -2145,6 +2515,7 @@ cmd_dashboard() {
   case "$lines" in
     ""|*[!0-9]*) die "--lines must be a non-negative integer" ;;
   esac
+  validate_tail_settings "$lines"
   if [ -n "$watch_seconds" ]; then
     case "$watch_seconds" in
       ""|0|*[!0-9]*) die "--watch must be a positive integer number of seconds" ;;
@@ -2233,6 +2604,7 @@ cmd_tmux_capture() {
   case "$lines" in
     ""|*[!0-9]*) die "--lines must be a non-negative integer" ;;
   esac
+  validate_tail_settings "$lines"
   [ $# -gt 0 ] || die "tmux capture requires a session name"
   session="$(sanitize_name "$1")"
   apply_context_override "$account_override" "$remote_override"
@@ -2364,8 +2736,9 @@ cmd_put_run() {
 
 cmd_shell() {
   load_project
+  ensure_ssh_master || return $?
   ssh_common_args
-  run_transport ssh -t "${SSH_ARGS[@]}" "$ACCOUNT_TARGET" "cd $(shell_quote "$REMOTE_ROOT") && exec bash -l"
+  ssh -t "${SSH_ARGS[@]}" "$ACCOUNT_TARGET" "cd $(shell_quote "$REMOTE_ROOT") && exec bash -l"
 }
 
 cmd_history() {

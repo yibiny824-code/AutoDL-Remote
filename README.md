@@ -38,13 +38,19 @@
 | ⬆️ 显式上传 | 用 `put` 或 `sync-up` 把本地改过的文件送到远端 |
 | ⬇️ 显式下载 | 用 `get` 或 `sync-down` 只拉回需要查看或提交的结果 |
 | 📜 日志查看 | 用 `tail` 查看远端训练日志，不必下载大文件 |
-| 🧾 Job 状态 | 用 `job status` 和 `job tail` 跟踪 `exec --detach --name` 创建的长任务 |
+| 🧾 Job 生命周期 | 用 `job status`、`job tail`、`job stop` 跟踪并停止 `exec --detach --name` 创建的长任务 |
 | 🧵 tmux 后端 | 可选用 `exec --tmux` 让长任务保留远端终端 pane，方便 dashboard 展示现场输出 |
 | 📊 Dashboard | 用只读页面查看多台远端设备、run 状态、最近日志或 tmux pane 输出 |
 | 🧠 脚本执行 | 用 `exec --script` 或 `exec --stdin` 避免复杂 quoting |
 | ⏻ 远端关机 | 用 `shutdown` 处理 AutoDL 关机和 SSH 断开返回码 |
 | 📝 项目约定 | 首次使用自动生成 `.autodl-remote/CONVENTIONS.md` 记录远端约定 |
 | 🧩 Codex 友好 | 插件不替你判断同步策略，把决策权留给用户和 Codex |
+
+## 🆕 0.8.1 修复
+
+- 新增 `job stop` / `run stop`，停止 detach 作业的整个进程组，并保留已完成作业的原始退出状态。
+- 防止活跃同名 job 覆盖；需要替换时使用显式 `--replace`。
+- 修复 detach 命令参数引用、尾随 `job tail --lines` 解析，以及死 runner 的 `lost` 状态归一化。
 
 ## 🆕 0.8.0 更新
 
@@ -273,6 +279,7 @@ autodl-remote dashboard --fleet llm-exp --open --watch 5 --lines 120
 | `autodl-remote tmux capture train --lines 200` | 抓取 tmux pane 最近输出 |
 | `autodl-remote job list` | 列出本地记录的远端长任务 |
 | `autodl-remote job status train` | 查看长任务 PID、日志、远端状态和退出码 |
+| `autodl-remote job stop train` | 终止 detach 作业的整个进程组，并记录 cancelled |
 | `autodl-remote job tail train` | 查看命名长任务日志 |
 | `autodl-remote fleet status exp` | 查看多台远端设备状态 |
 | `autodl-remote dashboard --fleet exp --watch 5 --lines 120` | 打开只读 dashboard，持续展示远端状态和日志 |
@@ -320,9 +327,34 @@ autodl-remote put-run train.py -- python train.py
 autodl-remote exec --detach --name train -- python train.py
 autodl-remote job status train
 autodl-remote job tail train
+# 主动停止时会先向整个 detached 进程组发送 TERM，必要时再发送 KILL。
+autodl-remote job stop train
 autodl-remote cat -- outputs/metrics.json
 autodl-remote get outputs/metrics.json outputs/metrics.json
 ```
+
+非 `--follow` 的 `job tail` / `run tail` 会先把 tqdm 使用的回车更新规范化为逻辑日志行、移除 ANSI 控制序列，再取最后 N 行。单次输出默认最多 64 KiB。
+
+同名的运行中 detach job 默认会拒绝提交，避免覆盖元数据。只有明确指定 `--replace` 才会先停止旧作业再启动新作业：
+
+```bash
+autodl-remote exec --detach --replace --name train -- python train.py --resume
+```
+
+`job tail train --lines 20` 与 `job tail --lines 20 train` 等价；若 status 文件写着 `running` 但 runner PID 已不存在，`job status` / `run list` 会显示 `lost` 并提示使用 `job stop` 清理可能仍存活的同进程组子进程。
+
+SSH 连接与监控边界可通过环境变量调整：
+
+```bash
+AUTODL_REMOTE_TAIL_MAX_BYTES=65536
+AUTODL_REMOTE_CONNECT_TIMEOUT=10
+AUTODL_REMOTE_CONNECTION_ATTEMPTS=2
+AUTODL_REMOTE_MONITOR_TIMEOUT=30
+# 可选；未设置时按首连预算自动计算，且不少于 60 秒
+# AUTODL_REMOTE_MASTER_LOCK_TIMEOUT=60
+```
+
+这些值都必须是正整数；单位除字节数和重试次数外均为秒。默认 master 锁等待为 `max(60, 2 × ConnectTimeout × ConnectionAttempts + 5)`，因此提高建连预算时，并发等待者不会比创建者更早放弃。
 
 需要看远端终端现场时，使用可选 tmux 后端：
 
