@@ -1,7 +1,7 @@
 {
   "name": "autodl-remote",
-  "version": "0.8.1",
-  "description": "Bash-only SSH account, fleet, command, tmux, upload, download, job, dashboard, and shutdown tool layer for AutoDL.",
+  "version": "0.9.0+codex.20260715093031",
+  "description": "SSH CLI and MCP tools for AutoDL accounts, commands, files, jobs, fleets, tmux, dashboards, and shutdown.",
   "author": {
     "name": "haibarazz",
     "url": "https://github.com/haibarazz/AutoDL-Remote"
@@ -16,13 +16,15 @@
     "remote-jobs",
     "tmux",
     "rsync",
+    "mcp",
     "codex"
   ],
   "skills": "./skills/",
+  "mcpServers": "./.mcp.json",
   "interface": {
     "displayName": "AutoDL Remote",
     "shortDescription": "Control AutoDL over SSH from local Codex.",
-    "longDescription": "Provides SSH account and fleet management, remote command execution, optional tmux-backed long jobs, explicit file upload/download primitives, remote job/run tracking, read-only dashboard generation, script execution, and shutdown handling. Codex decides what to inspect, push, pull, and run.",
+    "longDescription": "Provides a local SSH CLI plus standardized MCP tools for account and fleet management, remote command execution, optional tmux-backed long jobs, explicit file upload/download, remote job/run tracking, read-only dashboard generation, and guarded shutdown handling. Codex decides what to inspect, push, pull, and run.",
     "developerName": "haibarazz",
     "category": "Developer Tools",
     "capabilities": [

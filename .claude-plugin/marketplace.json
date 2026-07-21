@@ -1,0 +1,19 @@
+{
+  "name": "haibarazz-plugins",
+  "metadata": {
+    "description": "Claude Code plugins published by haibarazz."
+  },
+  "owner": {
+    "name": "haibarazz"
+  },
+  "plugins": [
+    {
+      "name": "autodl-remote",
+      "source": "./plugins/autodl-remote",
+      "description": "Control AutoDL and other SSH servers through a local CLI and guarded MCP tools.",
+      "author": {
+        "name": "haibarazz"
+      }
+    }
+  ]
+}

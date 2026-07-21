@@ -5,11 +5,13 @@
 <div align="center">
   <img src="./docs/images/autodl-remote-hero.png" alt="AutoDL Remote 工作原理" width="100%">
   <h1>AutoDL Remote</h1>
-  <h3>让 Codex 留在本地，让 GPU 在远端跑</h3>
-  <p><em>一个面向 Codex App 的极简 SSH 插件：账号管理、远端命令、显式上传和下载。</em></p>
+  <h3>让 Claude Code / Codex 留在本地，让 GPU 在远端跑</h3>
+  <p><em>一个面向 Claude Code 与 Codex 的 AutoDL SSH 插件：本地 CLI、标准 MCP 工具、远端任务与显式文件传输。</em></p>
   <p>
+    <img src="https://img.shields.io/badge/Claude_Code-Plugin-D97757?style=flat&logo=anthropic&logoColor=white" alt="Claude Code Plugin">
     <img src="https://img.shields.io/badge/Codex-Plugin-111827?style=flat&logo=openai&logoColor=white" alt="Codex Plugin">
-    <img src="https://img.shields.io/badge/Bash-only-4EAA25?style=flat&logo=gnubash&logoColor=white" alt="Bash only">
+    <img src="https://img.shields.io/badge/Bash_CLI-4EAA25?style=flat&logo=gnubash&logoColor=white" alt="Bash CLI">
+    <img src="https://img.shields.io/badge/MCP-tools-2563EB?style=flat" alt="MCP tools">
     <img src="https://img.shields.io/badge/SSH-Remote-blue?style=flat" alt="SSH Remote">
     <img src="https://img.shields.io/badge/AutoDL-GPU-brightgreen?style=flat" alt="AutoDL GPU">
     <img src="https://img.shields.io/badge/License-MIT-yellow?style=flat" alt="MIT License">
@@ -20,13 +22,13 @@
 
 ## 🎯 项目介绍
 
-&emsp;&emsp;AutoDL Remote 的目标很直接：**Codex 在本地写代码，远端 GPU 机器负责运行代码；需要什么文件，就显式上传或下载什么文件。**
+&emsp;&emsp;AutoDL Remote 的目标很直接：**Claude Code 或 Codex 在本地写代码，远端 GPU 机器负责运行代码；需要什么文件，就显式上传或下载什么文件。**
 
-&emsp;&emsp;做 LLM、深度学习、论文复现实验时，模型权重、数据集、checkpoint 往往都在 AutoDL 这类远端 GPU 环境里。本地电脑不适合下载大模型，直接在远端安装和登录 Codex 又容易遇到代理、浏览器登录、环境配置等问题。
+&emsp;&emsp;做 LLM、深度学习、论文复现实验时，模型权重、数据集、checkpoint 往往都在 AutoDL 这类远端 GPU 环境里。本地电脑不适合下载大模型，直接在远端安装和登录 Claude Code 或 Codex 又容易遇到代理、浏览器登录、环境配置等问题。
 
-&emsp;&emsp;这个插件选择更简单的路线：远端不需要安装 daemon，不需要运行服务，只要能 SSH 登录即可。Codex 仍然在本地工作，本地保留代码修改痕迹和 Git diff；远端负责执行训练、推理和查看日志。
+&emsp;&emsp;这个插件选择更简单的路线：远端不需要安装 daemon，不需要运行服务，只要能 SSH 登录即可。Claude Code 或 Codex 仍然在本地工作，本地保留代码修改痕迹和 Git diff；远端负责执行训练、推理和查看日志。
 
-> **一句话理解：** AutoDL Remote 不是同步框架，而是给 Codex 用的一组 SSH 原语。
+> **一句话理解：** AutoDL Remote 不是同步框架，而是给 Claude Code 和 Codex 用的一组 SSH 原语。
 
 ## ✨ What You Get
 
@@ -44,9 +46,16 @@
 | 🧠 脚本执行 | 用 `exec --script` 或 `exec --stdin` 避免复杂 quoting |
 | ⏻ 远端关机 | 用 `shutdown` 处理 AutoDL 关机和 SSH 断开返回码 |
 | 📝 项目约定 | 首次使用自动生成 `.autodl-remote/CONVENTIONS.md` 记录远端约定 |
-| 🧩 Codex 友好 | 插件不替你判断同步策略，把决策权留给用户和 Codex |
+| 🧩 Agent 友好 | 插件不替你判断同步策略，把决策权留给用户和 coding agent |
 
-## 🆕 0.8.1 修复
+## 🆕 0.9.0：标准 MCP 工具
+
+- 插件现在同时提供现有 `autodl-remote` CLI 和 13 个聚合 MCP 工具；MCP 只是安全、结构化的入口，底层 SSH 行为仍由同一套 CLI 实现。
+- 常用账号、项目、文件、传输、执行、job/run、fleet、tmux、dashboard 和 shutdown 操作都可由模型直接调用。
+- 命令参数以 argv 数组传递，不经过本地 shell；输出统一包含退出码、stdout/stderr、截断标记和耗时。
+- 上传镜像删除、停止任务、杀 tmux、安装 tmux、危险命令放行和关机都要求明确确认；密码录入、交互 shell、持续 follow/watch 仍只保留在 CLI。
+
+## 0.8.1 修复
 
 - 新增 `job stop` / `run stop`，停止 detach 作业的整个进程组，并保留已完成作业的原始退出状态。
 - 防止活跃同名 job 覆盖；需要替换时使用显式 `--replace`。
@@ -65,7 +74,8 @@
 
 ## ✅ Requirements
 
-- Codex App，或支持插件 marketplace 的 Codex CLI。
+- Claude Code，或 Codex App / 支持插件 marketplace 的 Codex CLI。
+- 使用插件附带的 MCP 工具时，本机需要 Node.js；仅使用 Bash CLI 不需要 Node.js。
 - 本机需要 `bash`、`ssh`、`scp`。
 - 可选安装 `rsync`，目录同步会更快；没有 `rsync` 时仍可使用 `scp`。
 - 远端机器只需要能 SSH 登录，不需要安装 Codex、Python 包、OpenAI key 或额外 daemon。
@@ -74,7 +84,27 @@
 
 ## 📦 Install
 
-### Option A: Codex App 安装
+### Option A: Claude Code 安装
+
+发布到 GitHub `main` 后，直接添加 marketplace 并安装：
+
+```bash
+claude plugin marketplace add haibarazz/AutoDL-Remote
+claude plugin install autodl-remote@haibarazz-plugins
+```
+
+如果你已 clone 仓库，也可以在仓库根目录直接安装本地版本：
+
+```bash
+git clone https://github.com/haibarazz/AutoDL-Remote.git
+cd AutoDL-Remote
+claude plugin marketplace add .
+claude plugin install autodl-remote@haibarazz-plugins
+```
+
+安装后在 Claude Code 中运行 `/mcp`，应能看到 `plugin:autodl-remote:autodl-remote` 已连接。插件启用时，`bin/autodl-remote` 会加入 Claude Code Bash 会话的 `PATH`。
+
+### Option B: Codex App 安装
 
 1. 打开 Codex App。
 2. 进入 `插件` 页面。
@@ -108,7 +138,7 @@ Codex App 会在仓库根目录读取：
 
 添加 marketplace 后，在插件列表里选择 `AutoDL Remote` 并安装/启用。
 
-### Option B: Codex CLI marketplace
+### Option C: Codex CLI marketplace
 
 如果你的 Codex CLI 支持插件命令，可以使用 GitHub shorthand：
 
@@ -195,9 +225,9 @@ REMOTE_ROOT="/root/autodl-tmp/my-project"
 
 密码不会写入项目配置。
 
-### 3. 让 Codex 使用插件
+### 3. 让 Claude Code 或 Codex 使用插件
 
-在 Codex 对话里可以这样说：
+在 Claude Code 或 Codex 对话里可以这样说：
 
 ```text
 使用 AutoDL Remote，帮我检查当前项目是否已经绑定远端，并运行 doctor。
@@ -211,7 +241,21 @@ REMOTE_ROOT="/root/autodl-tmp/my-project"
 我已经在本地改好了 train.py。使用 AutoDL Remote 上传这个文件到远端，然后在远端运行训练并 tail 日志。
 ```
 
-安装成功后，Codex 应该能使用插件技能 `autodl-remote:autodl-remote`，并通过 `autodl-remote` CLI 执行 SSH、上传、下载和远端命令。
+在 Claude Code 中，插件技能以 `/autodl-remote:autodl-remote` 出现；在 Codex 中保留现有的 `autodl-remote:autodl-remote` 技能命名。两者都会通过 `autodl-remote` CLI 执行 SSH、上传、下载和远端命令。
+
+从 `0.9.0` 开始，插件还会注册 `autodl-remote` MCP server。新建 Claude Code 或 Codex 任务后，应该能看到以下 13 个聚合工具：
+
+| MCP 工具 | 标准化能力 |
+|---|---|
+| `autodl_account` | 账号 list/show/test/use/add（不接收密码） |
+| `autodl_bind` / `autodl_doctor` / `autodl_model_dir` | 项目绑定与诊断 |
+| `autodl_file` / `autodl_transfer` | tree/list/read/tail 与 upload/download |
+| `autodl_exec` | 前台、detach、tmux 远端命令 |
+| `autodl_job` / `autodl_run` | 长任务和实验生命周期 |
+| `autodl_fleet` / `autodl_tmux` | 多设备与持久终端 |
+| `autodl_dashboard` / `autodl_shutdown` | 一次性看板与受保护关机 |
+
+除账号操作外，MCP 工具都接收绝对路径 `projectRoot`，并在该目录下运行现有 CLI，因此会复用项目的 `.autodl-remote.conf`。文件、传输、sync-up、远端 cwd 和 dashboard 输出路径必须是项目相对路径，且不能通过 `..` 或符号链接越界。MCP 默认将 stdout 和 stderr 各限制为 64 KiB；开发或特殊场景可通过 `AUTODL_REMOTE_MCP_MAX_OUTPUT_BYTES` 调整。
 
 ## 🧪 First Run
 

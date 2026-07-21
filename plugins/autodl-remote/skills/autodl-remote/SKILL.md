@@ -1,22 +1,26 @@
 ---
 name: autodl-remote
-description: Use when Codex should control an AutoDL or SSH server from the local machine, run remote commands, and explicitly upload or download selected files.
+description: Use when the host coding agent should control an AutoDL or SSH server from the local machine, run remote commands, and explicitly upload or download selected files.
 ---
 
 # AutoDL Remote
 
-Use this skill when the user wants Codex to work locally while controlling AutoDL through SSH.
+Use this skill when the user wants the host coding agent to work locally while controlling AutoDL through SSH.
 
 ## Operating Model
 
 - The plugin is a thin SSH tool layer.
+- When the `autodl_*` MCP tools are available, prefer them for bounded account, project, file, transfer, execution, job/run, fleet, tmux, dashboard, and shutdown operations. Supply the absolute local project path as `projectRoot`.
+- Keep MCP file, transfer, sync-up, remote-cwd, and dashboard-output operands project-relative. Use the explicit account/remote context overrides when a different bound remote root is intended.
+- Use the CLI when the operation intentionally remains outside MCP: password save/delete, interactive `shell`, `exec --script`, `exec --stdin`, following logs, or a continuously watched/opened dashboard.
+- MCP destructive actions require their documented confirmation value. Never invent confirmation on the user's behalf when approval is required.
 - For AutoDL or remote SSH work, first verify the tool with `autodl-remote --version`, then use `autodl-remote` as the default gateway for remote commands and file transfer.
 - Do not hand-write raw `ssh`, `expect`, `scp`, or `rsync` workflows for AutoDL work unless `autodl-remote` is unavailable, the command fails after a reasonable retry, or the user explicitly asks to bypass the plugin.
 - If bypassing `autodl-remote`, state the concrete reason before doing so and avoid printing passwords or embedding credentials in shell history/logs.
 - For complex remote checks or multi-line scripts, use `autodl-remote exec --script` or `autodl-remote exec --stdin -- bash`; do not pack nested Python heredocs or long quoted scripts into a raw SSH command.
 - Do not decide that local or remote is the source of truth globally.
 - Do not use `local-main`, `remote-main`, manifests, sparse-cache modes, or automatic code ownership rules.
-- Codex decides the smallest useful action each time: inspect, upload, download, run, or tail logs.
+- The host coding agent decides the smallest useful action each time: inspect, upload, download, run, or tail logs.
 - Reusable project assets must be created or edited locally first, then uploaded with `put`, `sync-up`, or `put-run` before remote execution. This includes source code, notebooks, YAML/JSON/TOML configs, prompts, templates, and files needed to reproduce an experiment. Do not create or modify these durable files directly on the remote machine with heredocs, `cat > file`, editors, or shell redirection, unless the user explicitly asks for a remote-only edit.
 - Shell commands and shell launch wrappers are normally runtime control, not durable project assets. They may be generated or executed remotely without local persistence for startup glue, environment checks, quoting-heavy commands, process supervision, and one-off experiment launches. Only save shell scripts locally when the user asks to keep them or they become a named project entrypoint.
 - Do not download LLM weights, checkpoints, datasets, or large outputs unless the user explicitly asks.
@@ -32,7 +36,7 @@ Use this skill when the user wants Codex to work locally while controlling AutoD
 - When the user wants to watch progress visually, run `autodl-remote dashboard --watch <seconds> --lines <n> --open` instead of copying logs into chat.
 - Use `shutdown` when the user asks to stop the remote machine; treat SSH disconnect during shutdown as likely success.
 - Before using AutoDL Remote in a project, read `.autodl-remote/CONVENTIONS.md` if it exists. Treat it as the project-specific source for runtime, paths, sync rules, and notes.
-- When the user and Codex discuss or decide any project-specific remote configuration, runtime environment, path convention, model/data/output location, sync preference, or safety rule, update `.autodl-remote/CONVENTIONS.md` so future sessions can reuse it.
+- When the user and the host coding agent discuss or decide any project-specific remote configuration, runtime environment, path convention, model/data/output location, sync preference, or safety rule, update `.autodl-remote/CONVENTIONS.md` so future sessions can reuse it.
 - Keep `.autodl-remote/CONVENTIONS.md` concise and project-specific; do not turn it into a generic manual.
 - When writing remote run scripts, emit clear stdout logs because dashboard content comes from the remote log, not from Codex narration. Prefer markers such as `[START]`, `[ENV]`, `[PROGRESS]`, `[METRIC]`, `[OUTPUT]`, `[DONE]`, and `[ERROR]`. For Python, prefer `PYTHONUNBUFFERED=1 python -u ...`.
 

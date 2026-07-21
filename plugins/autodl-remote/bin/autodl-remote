@@ -2,7 +2,7 @@
 set -u
 
 PROGRAM="autodl-remote"
-PROGRAM_VERSION="0.8.1"
+PROGRAM_VERSION="0.9.0"
 APP_DIR="$HOME/.autodl-remote"
 ACCOUNTS_DIR="$APP_DIR/accounts"
 DEFAULT_ACCOUNT_FILE="$APP_DIR/default-account"

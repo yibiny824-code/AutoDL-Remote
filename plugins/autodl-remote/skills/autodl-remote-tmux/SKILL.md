@@ -16,6 +16,8 @@ Use this skill together with `autodl-remote:autodl-remote` when remote jobs need
 
 ## Required Behavior
 
+- When MCP tools are available, prefer `autodl_tmux` for check/list/capture and `autodl_exec` with `mode=tmux` for launches. Use the absolute local project path as `projectRoot`.
+- `autodl_tmux` installation requires `confirm=install-tmux`; killing a session requires `confirm` to exactly match the session name.
 - First check availability with `autodl-remote tmux check`.
 - If the remote machine does not have tmux and tmux is useful for the task, install it with `autodl-remote tmux install` unless the user has explicitly forbidden remote package installation.
 - Do not hand-write raw SSH/tmux commands unless `autodl-remote` is unavailable or the user explicitly asks to bypass it.

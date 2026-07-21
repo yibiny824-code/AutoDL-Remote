@@ -1,14 +1,33 @@
 # AutoDL Remote
 
-AutoDL Remote is a thin SSH tool layer for Codex.
+AutoDL Remote is a thin SSH tool layer for Claude Code and Codex. Version 0.9.0 provides both the existing local CLI and a dependency-free MCP server.
 
-It does not decide whether local code or remote code is the source of truth. Codex and the user decide what to inspect, upload, download, and run.
+It does not decide whether local code or remote code is the source of truth. The coding agent and user decide what to inspect, upload, download, and run.
 
-The remote server does not need Codex, Python, a proxy, an OpenAI login, or a daemon.
+The remote server does not need Claude Code, Codex, Python, a proxy, an OpenAI login, or a daemon.
+
+## Install in Claude Code
+
+Install from GitHub after this repository's Claude marketplace files are published to `main`:
+
+```text
+/plugin marketplace add haibarazz/AutoDL-Remote
+/plugin install autodl-remote@haibarazz-plugins
+```
+
+Claude Code starts the bundled MCP server when the plugin is enabled. The bundled `bin/autodl-remote` command is available in Claude Code Bash sessions.
+
+For local plugin development from the repository root:
+
+```bash
+claude --plugin-dir ./plugins/autodl-remote
+```
+
+Then use `/mcp` to confirm that the plugin server is connected. Run `/reload-plugins` after changing plugin files in an active session.
 
 ## Model
 
-The plugin has three primitives:
+The CLI has three primitives:
 
 - SSH account management
 - Remote command execution
@@ -34,6 +53,19 @@ REMOTE_ROOT="/root/autodl-tmp/my-project"
 ```
 
 Passwords are never written to project files.
+
+## MCP Tools
+
+The plugin registers `mcp/server.mjs` through its host manifest. It exposes 13 grouped tools instead of one tool per CLI subcommand:
+
+- `autodl_account`, `autodl_bind`, `autodl_doctor`, `autodl_model_dir`
+- `autodl_file`, `autodl_transfer`, `autodl_exec`
+- `autodl_job`, `autodl_run`, `autodl_fleet`, `autodl_tmux`
+- `autodl_dashboard`, `autodl_shutdown`
+
+All project tools require an absolute `projectRoot`; the MCP server starts the existing CLI in that directory and returns structured exit status, stdout, stderr, truncation flags, and duration. File, transfer, sync-up, remote-cwd, and dashboard-output operands must stay project-relative and cannot escape through `..` or symlinks. Commands are spawned as argv without a local shell.
+
+Passwords, interactive shell sessions, follow/watch loops, dashboard auto-open, and stdin/script payloads remain CLI-only. Destructive MCP actions, including mirrored upload deletion, require explicit confirmation. Output is bounded to 64 KiB per stream by default and can be changed with `AUTODL_REMOTE_MCP_MAX_OUTPUT_BYTES`.
 
 ## Quick Start
 
@@ -129,7 +161,7 @@ autodl-remote dashboard --fleet rag-exp --open
 autodl-remote dashboard --fleet rag-exp --open --watch 5 --lines 120
 ```
 
-Run metadata lets the dashboard show what Codex intended to run:
+Run metadata lets the dashboard show what the coding agent intended to run:
 
 ```bash
 autodl-remote exec --account autodl-nmb1 --remote /root/autodl-tmp/LLM-RAG \
@@ -291,7 +323,7 @@ autodl-remote history
 - Use `exec --tmux --name` when live pane output matters, especially for long tasks, parallel runs, or multiple hosts.
 - Use `fleet` and `dashboard` for multi-device visibility; the dashboard is display-only.
 - Use `dashboard --watch <seconds> --lines <n>` when the user wants to watch remote logs without spending chat tokens.
-- Use run metadata flags (`--model`, `--tag`, `--stage`, `--purpose`) when Codex launches experiments so later dashboards are understandable.
+- Use run metadata flags (`--model`, `--tag`, `--stage`, `--purpose`) when the coding agent launches experiments so later dashboards are understandable.
 - Use `shutdown` instead of guessing provider-specific poweroff commands.
 
 ## Runtime Bounds

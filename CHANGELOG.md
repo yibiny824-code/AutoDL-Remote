@@ -1,5 +1,20 @@
 # Changelog
 
+## Unreleased
+
+- Added a Claude Code plugin manifest with an inline MCP server configuration that resolves from `${CLAUDE_PLUGIN_ROOT}`.
+- Added a GitHub-installable Claude Code marketplace at `.claude-plugin/marketplace.json`.
+- Updated plugin documentation and skill guidance for Claude Code while retaining the existing Codex packaging.
+
+## 0.9.0
+
+- Added a dependency-free MCP server that exposes 13 grouped tools for accounts, project binding, diagnostics, model directories, remote file inspection, transfer, execution, jobs, experiment runs, fleets, tmux, dashboard rendering, and shutdown.
+- Kept the existing Bash CLI as the single SSH implementation; MCP validates structured inputs, invokes the CLI without a local shell, and returns consistent structured output.
+- Added explicit confirmation gates for mirrored upload deletions, job/run/tmux termination, remote tmux installation, dangerous command overrides, and machine shutdown.
+- Enforced project-relative file, transfer, sync-up, execution-cwd, and dashboard-output operands (including symlink containment), required canonical job/session names, and negotiated a known MCP protocol version.
+- Excluded password save/delete, interactive shells, following tails, dashboard watch/open, and stdin/script payloads from MCP so secrets and unbounded interactive sessions stay in deliberate CLI workflows.
+- Added bounded stdout/stderr capture with `AUTODL_REMOTE_MCP_MAX_OUTPUT_BYTES` (64 KiB by default), structured non-zero exit results, lifecycle cleanup, and Node integration tests.
+
 ## 0.8.1
 
 - Added `job stop <name>` and `run stop <name>` for detached-job lifecycle control. They terminate the isolated runner process group with `TERM` then `KILL`, and record `status=cancelled`.
