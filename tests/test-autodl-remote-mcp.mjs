@@ -465,6 +465,8 @@ test("MCP standardizes common project, file, transfer, and execution commands", 
   assert.deepEqual(
     listed.tools.map((tool) => tool.name),
     [
+      "autodl_windows_bind",
+      "autodl_windows_init",
       "autodl_account",
       "autodl_bind",
       "autodl_doctor",

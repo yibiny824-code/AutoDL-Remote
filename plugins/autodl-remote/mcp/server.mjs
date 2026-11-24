@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import { spawn } from "node:child_process";
+import { selectBackend } from "../windows/routing.mjs";
 import { lstatSync, realpathSync, statSync } from "node:fs";
 import path from "node:path";
 import readline from "node:readline";
@@ -56,6 +57,25 @@ function tool(name, description, properties, required = [], annotations = {}) {
 }
 
 const tools = [
+  tool(
+    "autodl_windows_bind",
+    "Create a native Windows project binding (SSH key/agent auth, existing Windows root and absolute python.exe). Does not contact or install software on the server.",
+    {
+      projectRoot: projectRootProperty,
+      target: { type: "string", description: "SSH host alias or user@host" },
+      remote: { type: "string", description: "Absolute Windows project path, e.g. D:/GPUProjects/demo" },
+      python: { type: "string", description: "Absolute remote python.exe path" },
+      port: { type: "integer", minimum: 1, maximum: 65535 },
+      key: { type: "string", description: "Optional local key file path; never private key contents" },
+    },
+    ["projectRoot", "target", "remote", "python"],
+  ),
+  tool(
+    "autodl_windows_init",
+    "Explicitly upload the versioned, project-scoped Windows worker scripts after SSH and Python verification. No daemon, no global installation.",
+    { projectRoot: projectRootProperty },
+    ["projectRoot"],
+  ),
   tool(
     "autodl_account",
     "Manage saved AutoDL SSH account profiles. Supports list, show, test, use, and add. Password save/delete are intentionally excluded so credentials never pass through MCP arguments.",
@@ -597,6 +617,13 @@ function buildTmux(input) {
 function buildCommand(name, input) {
   if (!input || typeof input !== "object" || Array.isArray(input)) fail("arguments must be an object");
   switch (name) {
+    case "autodl_windows_bind": {
+      const args = ["windows", "bind", "--target", requiredString(input, "target"), "--remote", requiredString(input, "remote"), "--python", requiredString(input, "python")];
+      if (input.port !== undefined) args.push("--port", String(integer(input, "port", 22, 1, 65535)));
+      addOption(args, "--key", optionalString(input, "key"));
+      return { args, cwd: projectCwd(input) };
+    }
+    case "autodl_windows_init": return { args: ["windows", "init"], cwd: projectCwd(input) };
     case "autodl_account": return buildAccount(input);
     case "autodl_bind": return buildBind(input);
     case "autodl_doctor": return { args: ["doctor"], cwd: projectCwd(input) };
@@ -651,7 +678,8 @@ function runCli(args, cwd) {
     const stdoutState = { chunks: [], bytes: 0, truncated: false };
     const stderrState = { chunks: [], bytes: 0, truncated: false };
     let settled = false;
-    const child = spawn(cliPath, args, {
+    const selected = selectBackend(args, cwd, cliPath);
+    const child = spawn(selected.executable, selected.args, {
       cwd,
       env: process.env,
       stdio: ["ignore", "pipe", "pipe"],
