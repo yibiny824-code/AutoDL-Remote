@@ -31,6 +31,7 @@ usage: autodl-remote <command> [options]
 general:
   --version
   version
+  windows <command>    Native Windows backend (see docs/windows-backend.md)
 
 account:
   account add <name> [--target root@host | --host host --user root] [--port 22] [--key path] [--auth prompt|keychain|ssh-key] [--default-remote path]
@@ -2755,10 +2756,51 @@ cmd_history() {
   tail -n "$lines" "$file"
 }
 
+# Native Windows backend is selected by an explicit command or nearest project marker.
+windows_project_bound() {
+  local dir
+  dir="$(pwd)"
+  while :; do
+    [ ! -e "$dir/.autodl-remote-windows.json" ] || return 0
+    [ ! -e "$dir/$CONFIG_FILE" ] || return 1
+    [ "$dir" != "/" ] || return 1
+    dir="$(dirname "$dir")"
+  done
+}
+
+windows_dispatch() {
+  local source="${BASH_SOURCE[0]}" directory link controller py
+  while [ -L "$source" ]; do
+    directory="$(cd "$(dirname "$source")" && pwd)"
+    link="$(readlink "$source")"
+    case "$link" in /*) source="$link" ;; *) source="$directory/$link" ;; esac
+  done
+  directory="$(cd "$(dirname "$source")" && pwd)"
+  controller="$directory/../windows/controller.py"
+  py="${AUTODL_REMOTE_WINDOWS_PYTHON:-}"
+  case "$(uname -s)" in
+    MINGW*|MSYS*|CYGWIN*)
+      [ -n "$py" ] || py=python
+      if command -v cygpath >/dev/null 2>&1; then controller="$(cygpath -w "$controller")"; fi
+      MSYS2_ARG_CONV_EXCL='*' "$py" "$controller" "$@" ;;
+    *)
+      [ -n "$py" ] || py=python3
+      "$py" "$controller" "$@" ;;
+  esac
+}
+
 main() {
   [ $# -gt 0 ] || { usage; exit 0; }
   local cmd="$1"
   shift
+  if [ "$cmd" = "windows" ]; then
+    windows_dispatch "$@"
+    return $?
+  fi
+  case "$cmd" in
+    account|-h|--help|help|-V|--version|version) ;;
+    *) if windows_project_bound; then windows_dispatch "$cmd" "$@"; return $?; fi ;;
+  esac
   case "$cmd" in
     -h|--help|help) usage ;;
     -V|--version|version) cmd_version ;;
